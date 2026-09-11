@@ -14,6 +14,26 @@
 
 ---
 
+## 📸 界面效果预览
+
+### 1. 深度融入原生界面的高颜值按钮与自动刷新列表
+> 在原有「+ 添加模型」右侧新增微渐变「**⚡️ 自动拉取模型**」按钮，拉取并保存后，所有模型卡片**秒级自动呈现在列表中**，无需手动刷新！
+
+<p align="center">
+  <img src="./assets/model-list-and-button.png" alt="模型列表与自动拉取按钮" width="85%" />
+</p>
+
+---
+
+### 2. 智能比对模型与白天/暗黑主题自适应弹窗
+> 智能区分「已添加」与「未添加」模型，已存在的模型自动识别并取消勾选（防重复添加），未添加的新模型自动全选；完美跟随 ZCode 浅色/深色主题！
+
+<p align="center">
+  <img src="./assets/model-select-modal.png" alt="智能比对与主题自适应弹窗" width="85%" />
+</p>
+
+---
+
 ## 📖 项目背景
 
 [ZCode](https://zcode.z.ai) 是一款强大的 AI 编程桌面客户端，支持配置自定义模型供应商（如 OpenAI 兼容接口、各大中转站、OneAPI、NewAPI、阿里百炼、DeepSeek、Ollama 等）。
@@ -89,6 +109,7 @@ cd zcode-model-puller
 
 ```text
 zcode-model-puller/
+├── assets/                # 效果预览截图
 ├── run.py                 # 总控制台入口
 ├── zcode_sync.py          # 核心模型探测与 CLI 同步引擎
 ├── inject_tool.py         # 客户端打包、安全注入与还原引擎
