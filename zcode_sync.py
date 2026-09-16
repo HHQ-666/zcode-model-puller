@@ -16,7 +16,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-ZCODE_CONFIG_PATH = Path.home() / ".zcode" / "v2" / "config.json"
+ZCODE_CONFIG_PATH = Path.home() / ".zcode" / "v2" / "provider_config.json"
 ZCODE_APP_PATH = Path("/Applications/ZCode.app")
 ASAR_PATH = ZCODE_APP_PATH / "Contents" / "Resources" / "app.asar"
 ASAR_BAK_PATH = ZCODE_APP_PATH / "Contents" / "Resources" / "app.asar.original.bak"
@@ -37,10 +37,13 @@ def load_config():
 def save_config(config_data):
     try:
         # 备份一份
-        bak_file = ZCODE_CONFIG_PATH.with_name(f"config.json.bak.{int(time.time())}")
+        bak_file = ZCODE_CONFIG_PATH.with_name(f"provider_config.json.bak.{int(time.time())}")
         shutil.copy2(ZCODE_CONFIG_PATH, bak_file)
-        with open(ZCODE_CONFIG_PATH, "w", encoding="utf-8") as f:
+        tmp_file = ZCODE_CONFIG_PATH.with_name(ZCODE_CONFIG_PATH.name + ".puller.tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(config_data, f, ensure_ascii=False, indent=2)
+        os.chmod(tmp_file, 0o600)
+        os.replace(tmp_file, ZCODE_CONFIG_PATH)
         return True
     except Exception as e:
         print(f"❌ 保存配置文件失败: {e}")
@@ -68,7 +71,7 @@ def fetch_models_from_api(base_url: str, api_key: str = "", timeout: int = 10):
         candidates.append(f"{base_url}/v1/models")
 
     headers = {
-        "User-Agent": "ZCode/3.11.2",
+        "User-Agent": "ZCode/3.12.2",
         "Accept": "application/json",
     }
     if api_key:
@@ -116,13 +119,72 @@ def fetch_models_from_api(base_url: str, api_key: str = "", timeout: int = 10):
 
 
 def list_providers(config_data):
-    providers = config_data.get("provider", {})
+    """
+    列出 provider_config.json 中的自定义（API Key 类型）供应商规则。
+    ZCode 3.12+ 起内置供应商单独存放，此处仅返回用户自建的供应商。
+    """
+    rules = (config_data.get("config", {})
+             .get("providerConfigRules", {})
+             .get("providerRules", []))
     custom_list = []
-    for pid, pdata in providers.items():
-        # 排除官方内置的 provider（如 builtin:bigmodel, builtin:zai 等）
-        if not pid.startswith("builtin:") and pdata.get("source") == "custom":
-            custom_list.append((pid, pdata))
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        pcfg = rule.get("config") or {}
+        access = pcfg.get("access") or {}
+        api = pcfg.get("api") or {}
+        if access.get("type") != "api-key" or not api.get("baseUrl"):
+            continue
+        custom_list.append(rule)
     return custom_list
+
+
+def provider_model_ids(pcfg):
+    """供应商已声明的全部模型 ID（保持声明顺序）。"""
+    ids = []
+    for key in ("personalModelIds", "modelOrder"):
+        for mid in pcfg.get(key) or []:
+            if isinstance(mid, str) and mid.strip() and mid not in ids:
+                ids.append(mid)
+    return ids
+
+
+def add_models_to_rule(config_data, rule, new_models):
+    """
+    把新模型写入供应商规则。
+    只做最小改动：追加 personalModelIds / modelOrder；
+    模型规则条目直接复制同供应商已有条目的 config，保证 strict 校验一定通过。
+    """
+    pcfg = rule.setdefault("config", {})
+    personal = list(pcfg.get("personalModelIds") or [])
+    order = list(pcfg.get("modelOrder") or [])
+    for mid in new_models:
+        if mid not in personal:
+            personal.append(mid)
+        if mid not in order:
+            order.append(mid)
+    pcfg["personalModelIds"] = personal
+    pcfg["modelOrder"] = order
+
+    mcr = config_data.setdefault("config", {}).setdefault("modelConfigRules", {})
+    rules = mcr.setdefault("providerModelRules", [])
+    mcr.setdefault("manualProviderModelRules", [])
+
+    siblings = [r for r in rules
+                if isinstance(r, dict) and r.get("providerId") == rule.get("providerId") and r.get("config")]
+    if not siblings:
+        return
+    template = json.loads(json.dumps(siblings[-1]["config"]))
+    declared = {r.get("modelId") for r in rules
+                if isinstance(r, dict) and r.get("providerId") == rule.get("providerId")}
+    for mid in new_models:
+        if mid in declared:
+            continue
+        rules.append({
+            "modelId": mid,
+            "providerId": rule.get("providerId"),
+            "config": json.loads(json.dumps(template)),
+        })
 
 
 def sync_cli():
@@ -140,10 +202,11 @@ def sync_cli():
         return
 
     print(f"\n已找到 {len(custom_providers)} 个自定义供应商：")
-    for idx, (pid, pdata) in enumerate(custom_providers, 1):
-        name = pdata.get("name", "未命名")
-        base_url = pdata.get("options", {}).get("baseURL", "-")
-        existing_models = list(pdata.get("models", {}).keys())
+    for idx, rule in enumerate(custom_providers, 1):
+        pcfg = rule.get("config") or {}
+        name = rule.get("providerName") or "未命名"
+        base_url = (pcfg.get("api") or {}).get("baseUrl", "-")
+        existing_models = provider_model_ids(pcfg)
         print(f"  [{idx}] {name}")
         print(f"      Base URL: {base_url}")
         print(f"      已有模型数: {len(existing_models)}")
@@ -163,11 +226,11 @@ def sync_cli():
         return
 
     total_added = 0
-    for pid, pdata in selected_targets:
-        name = pdata.get("name", "未命名")
-        opts = pdata.get("options", {})
-        base_url = opts.get("baseURL", "")
-        api_key = opts.get("apiKey", "")
+    for rule in selected_targets:
+        pcfg = rule.get("config") or {}
+        name = rule.get("providerName") or "未命名"
+        base_url = (pcfg.get("api") or {}).get("baseUrl", "")
+        api_key = (pcfg.get("access") or {}).get("apiKey", "")
 
         print(f"\n🔄 正在拉取供应商「{name}」的模型列表...")
         success, msg, fetched_models = fetch_models_from_api(base_url, api_key)
@@ -176,7 +239,7 @@ def sync_cli():
             continue
 
         print(f"  ✅ {msg}，共获取到 {len(fetched_models)} 个模型：")
-        existing_models = pdata.get("models", {})
+        existing_models = provider_model_ids(pcfg)
         new_models = [m for m in fetched_models if m not in existing_models]
         already_models = [m for m in fetched_models if m in existing_models]
 
@@ -188,22 +251,7 @@ def sync_cli():
             for m in new_models:
                 print(f"    + {m}")
 
-            for m in new_models:
-                existing_models[m] = {
-                    "limit": {
-                        "context": 1000000,
-                        "output": 128000
-                    },
-                    "modalities": {
-                        "input": ["text", "image", "video"],
-                        "output": ["text"]
-                    },
-                    "zcode": {
-                        "modalitiesConfigured": True,
-                        "modified": True
-                    }
-                }
-            pdata["models"] = existing_models
+            add_models_to_rule(cfg, rule, new_models)
             total_added += len(new_models)
         else:
             print("  👍 所有获取到的模型均已存在，无需添加。")
@@ -211,7 +259,7 @@ def sync_cli():
     if total_added > 0:
         if save_config(cfg):
             print(f"\n🎉 同步成功！共新增 {total_added} 个模型并写入 ZCode 配置。")
-            print("💡 如果 ZCode 正在运行，请重启或切换一下页面即可刷新模型列表！")
+            print("💡 ZCode 运行中会自动轮询到变更（约 1 秒内刷新模型列表），无需重启。")
     else:
         print("\n✨ 配置未发生变动。")
 

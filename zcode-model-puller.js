@@ -397,22 +397,71 @@
     return window.zcode;
   }
 
+  // 自定义供应商配置（ZCode 3.12+ 存放于 ~/.zcode/v2/provider_config.json）
   async function readZCodeConfig() {
     const api = getZCodeApi();
-    if (api?.readConfigFile) {
-      const res = await api.readConfigFile();
-      return res.data;
+    if (api?.readProviderConfigFile) {
+      const res = await api.readProviderConfigFile();
+      return res?.data ?? null;
     }
     return null;
   }
 
   async function writeZCodeConfig(data) {
     const api = getZCodeApi();
-    if (api?.writeConfigFile) {
-      const res = await api.writeConfigFile(data);
-      return res.success;
+    if (api?.writeProviderConfigFile) {
+      const res = await api.writeProviderConfigFile(data);
+      return !!res?.success;
     }
     return false;
+  }
+
+  function normalizeUrl(url) {
+    return (url || "").trim().replace(/\/+$/, "");
+  }
+
+  function getProviderRules(cfg) {
+    const rules = cfg?.config?.providerConfigRules?.providerRules;
+    return Array.isArray(rules) ? rules : [];
+  }
+
+  // 依据 Base URL / API Key / 供应商名称定位当前编辑的供应商规则
+  function resolveProviderRule(cfg, baseUrl, apiKey, providerName) {
+    const rules = getProviderRules(cfg);
+    const cleanBase = normalizeUrl(baseUrl);
+
+    if (cleanBase) {
+      const byBase = rules.find((r) => normalizeUrl(r?.config?.api?.baseUrl) === cleanBase);
+      if (byBase) return byBase;
+    }
+
+    const key = (apiKey || "").trim();
+    if (key) {
+      const byKey = rules.find((r) => (r?.config?.access?.apiKey || "").trim() === key);
+      if (byKey) return byKey;
+    }
+
+    const name = (providerName || "").trim();
+    if (name) {
+      const byName = rules.find((r) => (r?.providerName || "").trim() === name);
+      if (byName) return byName;
+    }
+
+    if (rules.length === 1) return rules[0];
+    return null;
+  }
+
+  // 供应商已声明的全部模型 ID
+  function getExistingModelIds(rule) {
+    const found = new Set();
+    const cfg = rule?.config || {};
+    for (const list of [cfg.personalModelIds, cfg.modelOrder, cfg.builtinModelIds]) {
+      if (!Array.isArray(list)) continue;
+      for (const id of list) {
+        if (typeof id === "string" && id.trim()) found.add(id.trim());
+      }
+    }
+    return found;
   }
 
   function getCurrentProviderName() {
@@ -462,7 +511,7 @@
   }
 
   // 精准识别外部已存在的模型列表
-  async function getExistingModels(baseUrl) {
+  async function getExistingModels(baseUrl, apiKey) {
     const existing = new Set();
 
     // 1. 扫描页面输入框中的模型 ID
@@ -484,17 +533,12 @@
       }
     }
 
-    // 2. 结合 config.json 辅助校验
+    // 2. 结合 provider_config.json 辅助校验
     try {
       const cfg = await readZCodeConfig();
-      if (cfg?.provider) {
-        const cleanBase = (baseUrl || "").replace(/\/+$/, "");
-        for (const [pid, pdata] of Object.entries(cfg.provider)) {
-          const pBase = (pdata.options?.baseURL || "").replace(/\/+$/, "");
-          if (pBase === cleanBase && pdata.models) {
-            Object.keys(pdata.models).forEach((m) => existing.add(m.trim()));
-          }
-        }
+      const rule = resolveProviderRule(cfg, baseUrl, apiKey, getCurrentProviderName());
+      if (rule) {
+        for (const id of getExistingModelIds(rule)) existing.add(id);
       }
     } catch (e) {
       console.warn("[ZCode-Model-Puller] 读取配置辅助识别出错:", e);
@@ -564,7 +608,7 @@
 
   // 模型选择弹窗
   async function openModelSelectModal(models, baseUrl, apiKey) {
-    const existingModels = await getExistingModels(baseUrl);
+    const existingModels = await getExistingModels(baseUrl, apiKey);
 
     const stateMap = new Map();
     let newCount = 0;
@@ -716,55 +760,63 @@
       confirmBtn.innerHTML = `<span>⏳ 正在保存...</span>`;
 
       try {
-        console.log("[ZCode-Model-Puller] 通过 IPC 读取配置文件...");
+        console.log("[ZCode-Model-Puller] 通过 IPC 读取供应商配置...");
         const cfg = await readZCodeConfig();
-        if (!cfg || !cfg.provider) {
-          throw new Error("未能获取到 ZCode 配置数据");
+        if (!cfg || !cfg.config) {
+          throw new Error("未能获取到 ZCode 供应商配置数据");
         }
 
-        const providers = cfg.provider;
-        let targetPid = null;
-        let p = null;
+        const rule = resolveProviderRule(cfg, baseUrl, apiKey, getCurrentProviderName());
+        if (!rule) {
+          throw new Error(
+            baseUrl
+              ? `未在配置中找到与 ${baseUrl} 匹配的供应商，请先保存该供应商后再拉取`
+              : "未找到匹配的供应商，请先填写 Base URL 并保存"
+          );
+        }
 
-        const cleanBase = (baseUrl || "").replace(/\/+$/, "");
-        for (const [pid, pdata] of Object.entries(providers)) {
-          const curBase = (pdata.options?.baseURL || "").replace(/\/+$/, "");
-          if (curBase === cleanBase) {
-            targetPid = pid;
-            p = pdata;
-            break;
+        const pcfg = rule.config || (rule.config = {});
+        const existingIds = getExistingModelIds(rule);
+        const added = toAdd.filter((id) => !existingIds.has(id));
+
+        // 1. 写入模型清单（保持既有顺序，新模型追加在末尾）
+        const personal = Array.isArray(pcfg.personalModelIds) ? pcfg.personalModelIds.slice() : [];
+        for (const id of toAdd) {
+          if (!personal.includes(id)) personal.push(id);
+        }
+        pcfg.personalModelIds = personal;
+
+        const order = Array.isArray(pcfg.modelOrder) ? pcfg.modelOrder.slice() : [];
+        for (const id of toAdd) {
+          if (!order.includes(id)) order.push(id);
+        }
+        pcfg.modelOrder = order;
+
+        // 2. 为新模型补模型规则：直接复制同供应商已有规则的 config，确保结构始终合法
+        const mcr = cfg.config.modelConfigRules || (cfg.config.modelConfigRules = {});
+        if (!Array.isArray(mcr.providerModelRules)) mcr.providerModelRules = [];
+        if (!Array.isArray(mcr.manualProviderModelRules)) mcr.manualProviderModelRules = [];
+
+        const siblings = mcr.providerModelRules.filter((r) => r?.providerId === rule.providerId && r.config);
+        if (siblings.length > 0 && added.length > 0) {
+          const template = JSON.parse(JSON.stringify(siblings[siblings.length - 1].config));
+          const declared = new Set(
+            mcr.providerModelRules.filter((r) => r?.providerId === rule.providerId).map((r) => r.modelId)
+          );
+          for (const id of added) {
+            if (declared.has(id)) continue;
+            mcr.providerModelRules.push({
+              modelId: id,
+              providerId: rule.providerId,
+              config: JSON.parse(JSON.stringify(template)),
+            });
           }
         }
 
-        if (!p) {
-          const pName = getCurrentProviderName();
-          for (const [pid, pdata] of Object.entries(providers)) {
-            if (pName && pdata.name === pName) {
-              targetPid = pid;
-              p = pdata;
-              break;
-            }
-          }
-        }
-
-        if (!p) {
-          throw new Error(`未在配置中找到与 ${baseUrl} 匹配的供应商`);
-        }
-
-        p.models = p.models || {};
-        let addedCount = 0;
-        for (const mid of toAdd) {
-          if (!p.models[mid]) {
-            p.models[mid] = {
-              limit: { context: 1000000, output: 128000 },
-              modalities: { input: ["text", "image", "video"], output: ["text"] },
-              zcode: { modalitiesConfigured: true, modified: true },
-            };
-            addedCount++;
-          }
-        }
-
-        console.log(`[ZCode-Model-Puller] 成功写入 ${addedCount} 个新模型到:`, p.name);
+        console.log(
+          `[ZCode-Model-Puller] 成功写入 ${added.length} 个新模型到:`,
+          rule.providerName || rule.providerId
+        );
         const ok = await writeZCodeConfig(cfg);
         if (!ok) {
           throw new Error("写入配置文件失败");
