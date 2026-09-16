@@ -2,6 +2,10 @@
 #
 # ZCode 自定义模型自动拉取增强工具 - 一键安装脚本
 #
+# 用法：
+#   ./install.sh             安装注入 + 启用更新守护（ZCode 更新后自动重装）
+#   ./install.sh --no-watch  仅安装注入，不启用更新守护
+#
 
 set -e
 
@@ -25,6 +29,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 执行注入
 python3 "${SCRIPT_DIR}/inject_tool.py"
+
+if [[ "${1:-}" == "--no-watch" ]]; then
+    echo ""
+    echo "🎉 安装完成（未启用更新守护）！请重启 ZCode（Command + Q 退出后再启动）即可体验！"
+    exit 0
+fi
+
+echo ""
+echo "========================================================"
+echo "⚡️ 正在启用「ZCode 更新守护」（更新后自动重新注入）..."
+echo "========================================================"
+
+python3 "${SCRIPT_DIR}/watch_agent.py" install
 
 echo ""
 echo "🎉 安装完成！请重启 ZCode（Command + Q 退出后再启动）即可体验！"

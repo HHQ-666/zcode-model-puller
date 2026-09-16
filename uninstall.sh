@@ -6,10 +6,13 @@
 set -e
 
 echo "========================================================"
-echo "🔄 正在将 ZCode 还原至官方原版状态..."
+echo " 正在将 ZCode 还原至官方原版状态..."
 echo "========================================================"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 先停用更新守护，避免还原过程中被自动重新注入
+python3 "${SCRIPT_DIR}/watch_agent.py" remove || true
 
 python3 "${SCRIPT_DIR}/inject_tool.py" --restore
 
