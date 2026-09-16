@@ -3,7 +3,7 @@
 <p align="center">
   <b>一键为 ZCode 客户端注入「自动拉取模型」能力，告别繁琐的手动输入！</b>
   <br />
-  自动探测 API 可用模型 · 智能比对已有模型 · 白天/夜间主题自适应 · 原生无感刷新 · 0 破坏性风险
+  自动探测 API 可用模型 · 智能比对已有模型 · 原生按钮样式 · 白天/夜间主题自适应 · 升级后自动重装 · 0 破坏性风险
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 > 在原有「+ 添加模型」右侧新增「**⚡️ 自动拉取模型**」按钮，尺寸/圆角/字号自动对齐官方按钮，与原生界面同族；拉取并保存后，所有模型卡片**秒级自动呈现在列表中**，无需手动刷新！
 
 <p align="center">
-  <img src="./assets/model-list-and-button.png" alt="模型列表与自动拉取按钮" width="85%" />
+  <img src="./assets/model-list-and-button.png" alt="模型列表与并排的原生样式自动拉取按钮" width="80%" />
 </p>
 
 ---
@@ -29,7 +29,7 @@
 > 智能区分「已添加」与「未添加」模型，已存在的模型自动识别并取消勾选（防重复添加），未添加的新模型自动全选；完美跟随 ZCode 浅色/深色主题！
 
 <p align="center">
-  <img src="./assets/model-select-modal.png" alt="智能比对与主题自适应弹窗" width="85%" />
+  <img src="./assets/model-select-modal.png" alt="智能比对与主题自适应弹窗" width="62%" />
 </p>
 
 ---
