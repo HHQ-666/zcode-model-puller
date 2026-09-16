@@ -40,12 +40,12 @@
       --zpull-badge-new-fg: #059669;
       --zpull-badge-new-border: #a7f3d0;
 
-      /* 浅色模式按钮高级质感 */
-      --zpull-trigger-bg: linear-gradient(135deg, #f0f7ff 0%, #e0effe 100%);
-      --zpull-trigger-fg: #1d4ed8;
-      --zpull-trigger-border: rgba(59, 130, 246, 0.32);
-      --zpull-trigger-hover-bg: linear-gradient(135deg, #e0effe 0%, #bae6fd 100%);
-      --zpull-trigger-hover-shadow: 0 4px 12px rgba(37, 99, 235, 0.18);
+      /* 浅色模式：与官方「添加模型」同族的次级按钮 */
+      --zpull-trigger-bg: #f4f4f5;
+      --zpull-trigger-fg: #18181b;
+      --zpull-trigger-border: transparent;
+      --zpull-trigger-hover-bg: #e8e8ea;
+      --zpull-trigger-icon: #2563eb;
     }
 
     .dark, html.dark, body.dark {
@@ -72,22 +72,22 @@
       --zpull-badge-new-fg: #10b981;
       --zpull-badge-new-border: rgba(16, 185, 129, 0.3);
 
-      /* 暗黑模式按钮高级质感 */
-      --zpull-trigger-bg: linear-gradient(135deg, rgba(37, 99, 235, 0.2) 0%, rgba(30, 58, 138, 0.28) 100%);
-      --zpull-trigger-fg: #60a5fa;
-      --zpull-trigger-border: rgba(96, 165, 250, 0.38);
-      --zpull-trigger-hover-bg: linear-gradient(135deg, rgba(37, 99, 235, 0.3) 0%, rgba(30, 58, 138, 0.42) 100%);
-      --zpull-trigger-hover-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
+      /* 暗黑模式：与官方「添加模型」同族的次级按钮 */
+      --zpull-trigger-bg: rgba(255, 255, 255, 0.08);
+      --zpull-trigger-fg: #ededed;
+      --zpull-trigger-border: transparent;
+      --zpull-trigger-hover-bg: rgba(255, 255, 255, 0.14);
+      --zpull-trigger-icon: #60a5fa;
     }
 
-    /* 现代高级感触发按钮样式 */
+    /* 与官方按钮同族的次级按钮样式（尺寸在注入时向官方按钮同步） */
     #zcode-auto-pull-models-btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
-      margin-left: 8px;
-      margin-top: 4px;
+      flex-shrink: 0;
+      white-space: nowrap;
       height: 36px;
       padding: 0 14px;
       border-radius: 8px;
@@ -97,17 +97,14 @@
       color: var(--zpull-trigger-fg);
       border: 1px solid var(--zpull-trigger-border);
       cursor: pointer;
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: background-color 0.15s ease, opacity 0.15s ease;
       user-select: none;
     }
     #zcode-auto-pull-models-btn:hover {
       background: var(--zpull-trigger-hover-bg);
-      box-shadow: var(--zpull-trigger-hover-shadow);
-      transform: translateY(-1px);
     }
     #zcode-auto-pull-models-btn:active {
-      transform: translateY(0);
+      opacity: 0.85;
     }
     #zcode-auto-pull-models-btn.loading {
       opacity: 0.75;
@@ -118,10 +115,7 @@
       width: 15px;
       height: 15px;
       fill: currentColor;
-      transition: transform 0.2s;
-    }
-    #zcode-auto-pull-models-btn:hover .zcode-pull-bolt-icon {
-      transform: scale(1.15);
+      color: var(--zpull-trigger-icon);
     }
 
     @keyframes zcodeSpin {
@@ -840,7 +834,21 @@
     document.body.appendChild(overlay);
   }
 
-  // 注入高级质感按钮
+  // 尺寸与圆角向官方「添加模型」按钮对齐，各版本都能自动贴合
+  function syncButtonMetrics(pullBtn, addModelBtn) {
+    try {
+      const cs = getComputedStyle(addModelBtn);
+      pullBtn.style.height = cs.height;
+      pullBtn.style.padding = cs.padding;
+      pullBtn.style.borderRadius = cs.borderRadius;
+      pullBtn.style.fontSize = cs.fontSize;
+      pullBtn.style.fontWeight = cs.fontWeight;
+    } catch (e) {
+      /* 忽略：样式同步失败时退回 CSS 默认值 */
+    }
+  }
+
+  // 注入与官方「添加模型」并排的按钮
   function checkAndInject() {
     let addModelBtn = document.querySelector('[data-testid="Goe"]');
     if (!addModelBtn) {
@@ -853,17 +861,26 @@
     if (!addModelBtn) return;
 
     const parent = addModelBtn.parentElement;
-    if (!parent || parent.querySelector("#zcode-auto-pull-models-btn")) return;
+    if (!parent) return;
 
+    // 官方该行是 space-between，按钮会被顶到两端；用自动外边距把两个按钮收拢到右侧
     parent.style.display = "flex";
-    parent.style.flexWrap = "wrap";
     parent.style.alignItems = "center";
     parent.style.gap = "8px";
+    parent.style.flexWrap = "wrap";
+    addModelBtn.style.marginLeft = "auto";
+
+    const existing = parent.querySelector("#zcode-auto-pull-models-btn");
+    if (existing) {
+      syncButtonMetrics(existing, addModelBtn);
+      return;
+    }
 
     const pullBtn = document.createElement("button");
     pullBtn.id = "zcode-auto-pull-models-btn";
     pullBtn.type = "button";
     pullBtn.setAttribute("title", "根据当前 Base URL 和 API Key 自动拉取所有可用模型");
+    syncButtonMetrics(pullBtn, addModelBtn);
 
     pullBtn.innerHTML = `
       <svg class="zcode-pull-bolt-icon" viewBox="0 0 24 24">
