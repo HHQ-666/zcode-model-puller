@@ -458,8 +458,20 @@
     return found;
   }
 
-  function getCurrentProviderName() {
-    const nameInputs = document.querySelectorAll("input[value]");
+  // 从拉取按钮向上找「同时包含 Base URL 文案和输入框」的最小容器（即供应商编辑卡片）。
+  // 不做全局 document 扫描：内嵌浏览器标签页的地址栏 input（值以 http 开头）会先于表单命中，
+  // 导致 baseUrl 被误抓成 127.0.0.1:8420/web 这类无关地址。
+  function findFormScope(anchor) {
+    let node = anchor && anchor.parentElement;
+    while (node) {
+      if (node.querySelector("input") && /Base\s*URL/i.test(node.textContent || "")) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function getCurrentProviderName(scope) {
+    const nameInputs = (scope || document).querySelectorAll("input[value]");
     for (const inp of nameInputs) {
       const val = inp.value.trim();
       if (val && !val.startsWith("http") && !val.startsWith("sk-") && !val.includes("/")) {
@@ -469,11 +481,19 @@
     return "";
   }
 
-  function getFormCredentials() {
+  // 界面上回显的 API Key 是掩码（如 ••••••），不是真实密钥。
+  // 把它塞进请求头会直接抛 ERR_INVALID_CHAR，必须识别并回退到配置文件里的真钥匙。
+  function isMaskedSecret(value) {
+    if (!value) return false;
+    if (/[\u2022\u00b7\u25cf\u25cb\u2027\u2219*\u00b0]/.test(value)) return true;
+    return /[^\x20-\x7e]/.test(value);
+  }
+
+  function getFormCredentials(scope) {
     let baseUrl = "";
     let apiKey = "";
 
-    const inputs = Array.from(document.querySelectorAll("input"));
+    const inputs = Array.from((scope || document).querySelectorAll("input"));
     for (const input of inputs) {
       const val = input.value.trim();
       const placeholder = (input.placeholder || "").toLowerCase();
@@ -486,7 +506,7 @@
           placeholder.includes("key") ||
           placeholder.includes("sk-"))
       ) {
-        if (val) apiKey = val;
+        if (val && !isMaskedSecret(val)) apiKey = val;
       }
 
       if (
@@ -502,6 +522,30 @@
     }
 
     return { baseUrl, apiKey };
+  }
+
+  // 表单里拿不到真钥匙时（掩码显示），回退到 provider_config.json 中已保存的密钥
+  async function resolveCredentials(scope) {
+    const form = getFormCredentials(scope);
+    let { baseUrl, apiKey } = form;
+    let storedApiKey = "";
+    let storedBaseUrl = "";
+    try {
+      const cfg = await readZCodeConfig();
+      const rule = cfg ? resolveProviderRule(cfg, baseUrl, apiKey, getCurrentProviderName(scope)) : null;
+      storedApiKey = ((rule?.config?.access?.apiKey) || "").trim();
+      storedBaseUrl = ((rule?.config?.api?.baseUrl) || "").trim();
+    } catch (e) {
+      console.warn("[ZCode-Model-Puller] 读取已保存的供应商凭据失败:", e);
+    }
+    if (!apiKey) apiKey = storedApiKey;
+    if (!baseUrl) baseUrl = storedBaseUrl;
+    console.log("[ZCode-Model-Puller] 凭据解析结果:", {
+      baseUrl,
+      fromForm: !!form.apiKey,
+      fallbackToStored: !form.apiKey && !!storedApiKey,
+    });
+    return { baseUrl, apiKey, storedApiKey };
   }
 
   // 精准识别外部已存在的模型列表
@@ -893,8 +937,8 @@
       e.preventDefault();
       e.stopPropagation();
 
-      const { baseUrl, apiKey } = getFormCredentials();
-      console.log("[ZCode-Model-Puller] 点击拉取，凭据:", { baseUrl, hasKey: !!apiKey });
+      const scope = findFormScope(pullBtn);
+      const { baseUrl, apiKey, storedApiKey } = await resolveCredentials(scope);
 
       if (!baseUrl) {
         showToast("⚠️ 请先在上方填写 Base URL");
@@ -915,6 +959,10 @@
         const api = getZCodeApi();
         if (api?.fetchModelsFromUrl) {
           result = await api.fetchModelsFromUrl(baseUrl, apiKey);
+          if (!result?.success && storedApiKey && storedApiKey !== apiKey) {
+            console.log("[ZCode-Model-Puller] 首次拉取失败，改用配置中已保存的 Key 重试");
+            result = await api.fetchModelsFromUrl(baseUrl, storedApiKey);
+          }
         } else {
           try {
             const cleanUrl = baseUrl.replace(/\/+$/, "");

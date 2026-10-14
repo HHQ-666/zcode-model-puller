@@ -118,9 +118,44 @@ def derive_preload_anchor(content: str):
 # 被注入的代码片段
 # --------------------------------------------------------------------------
 
+# 拉取模型的注入代码：普通字符串 + 占位符替换，避免 f-string 里大量花括号转义出错。
+# 失败时把「试过哪些地址、各自什么结果」拼进 error（旧版把异常静默吞掉，界面上只剩一句
+# "未能获取到模型列表"，无从排查）。
+MAIN_FETCH_TEMPLATE = r"""
+@IPC@.handle("@CHANNEL@",async(e,{baseUrl:u,apiKey:k})=>{try{
+let{default:ht}=await import("node:https"),{default:h}=await import("node:http");
+let clean=(u||"").trim().replace(/\/+$/,""),key=(k||"").trim(),candidates=[];
+if(/[^\x20-\x7e]/.test(key))return{success:!1,error:"界面上的 API Key 是掩码回显，不是真实密钥；请确认该供应商已保存后重试"};
+if(clean.endsWith("/v1")){candidates.push(clean+"/models");candidates.push(clean.replace(/\/v1$/,"")+"/models")}
+else{candidates.push(clean+"/v1/models");candidates.push(clean+"/models")}
+if(clean.endsWith("/api")){candidates.unshift(clean+"/v1/models")}
+let diag=[];
+for(let cur of candidates){
+let out=await new Promise(resolve=>{
+let mod=cur.startsWith("https:")?ht:h;
+let req=mod.request(cur,{method:"GET",headers:{"User-Agent":"ZCode","Accept":"application/json",...key?{Authorization:"Bearer "+key,"x-api-key":key}:{}},timeout:8000},r=>{
+let b="";r.on("data",c=>b+=c);r.on("end",()=>{
+if(r.statusCode>=200&&r.statusCode<300){
+try{let j=JSON.parse(b),l=Array.isArray(j)?j:Array.isArray(j.data)?j.data:Array.isArray(j.models)?j.models:[],ids=[];
+for(let it of l){let id=typeof it=="string"?it.trim():(it.id||it.name||"").trim();if(id&&!ids.includes(id))ids.push(id)}
+return resolve(ids.length>0?{success:!0,models:ids}:{fail:"HTTP "+r.statusCode+" 但未解析到模型"})}
+catch(err){return resolve({fail:"HTTP "+r.statusCode+" 响应不是 JSON"})}}
+let msg="";
+try{let j=JSON.parse(b);msg=(j&&((j.error&&(j.error.message||j.error))||j.message))||""}catch(err){msg=b.replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim()}
+return resolve({fail:"HTTP "+r.statusCode+(msg?" "+String(msg).slice(0,120):"")})})});
+req.on("error",err=>resolve({fail:String((err&&(err.code||err.message))||err)}));
+req.on("timeout",()=>{req.destroy();resolve({fail:"请求超时(8s)"})});
+req.end()});
+if(out&&out.success)return out;
+diag.push(cur.replace(/^https?:\/\//,"")+" → "+((out&&out.fail)||"未知失败"))}
+return{success:!1,error:"未能获取到模型列表（Base URL: "+clean+"，API Key: "+(key?key.length+" 字符":"未读取到")+"）\n"+diag.join("\n")}
+}catch(e){return{success:!1,error:String(e)}}}),
+"""
+
+
 def build_main_patch(ipc_var: str) -> str:
     """注入 main 进程 IPC 处理器。用逗号连接，兼容逗号表达式与语句两种上下文。"""
-    return (
+    head = (
         f'{ipc_var}.handle("{IPC_READ}",async()=>{{try{{let{{default:f}}=await import("node:fs"),'
         f'{{default:p}}=await import("node:path"),{{default:o}}=await import("node:os"),'
         f'file=p.join(o.homedir(),{json.dumps(PROVIDER_CONFIG_RELATIVE[0])},'
@@ -133,26 +168,10 @@ def build_main_patch(ipc_var: str) -> str:
         f'{json.dumps(PROVIDER_CONFIG_RELATIVE[1])},{json.dumps(PROVIDER_CONFIG_RELATIVE[2])}),'
         f'tmp=file+".puller.tmp";f.writeFileSync(tmp,JSON.stringify(d,null,2),"utf-8");'
         f'try{{f.chmodSync(tmp,384)}}catch{{}}f.renameSync(tmp,file);return{{success:!0}}}}'
-        f'catch(e){{return{{success:!1,error:String(e)}}}}}}),'
-        f'{ipc_var}.handle("{IPC_FETCH}",async(e,{{baseUrl:u,apiKey:k}})=>{{try{{'
-        f'let{{default:ht}}=await import("node:https"),{{default:h}}=await import("node:http");'
-        f'let clean=(u||"").trim().replace(/\\/+$/,"");let candidates=[];'
-        f'if(clean.endsWith("/v1")){{candidates.push(clean+"/models");candidates.push(clean.replace(/\\/v1$/,"")+"/models")}}'
-        f'else{{candidates.push(clean+"/v1/models");candidates.push(clean+"/models")}}'
-        f'if(clean.endsWith("/api")){{candidates.unshift(clean+"/v1/models")}}'
-        f'for(let cur of candidates){{try{{let res=await new Promise((resolve,reject)=>{{'
-        f'let mod=cur.startsWith("https:")?ht:h;let req=mod.request(cur,{{method:"GET",'
-        f'headers:{{"User-Agent":"ZCode"'
-        f',"Accept":"application/json",...k?{{Authorization:"Bearer "+k.trim(),"x-api-key":k.trim()}}:{{}}}},timeout:8000}},'
-        f'r=>{{let b="";r.on("data",c=>b+=c);r.on("end",()=>{{if(r.statusCode>=200&&r.statusCode<300){{'
-        f'try{{let j=JSON.parse(b);let l=Array.isArray(j)?j:Array.isArray(j.data)?j.data:Array.isArray(j.models)?j.models:[];'
-        f'let ids=[];for(let it of l){{let id=typeof it=="string"?it.trim():(it.id||it.name||"").trim();'
-        f'if(id&&!ids.includes(id))ids.push(id)}}if(ids.length>0)return resolve({{success:!0,models:ids}})}}catch(e){{}}}}resolve(null)}})}});'
-        f'req.on("error",()=>resolve(null));req.on("timeout",()=>{{req.destroy();resolve(null)}});req.end()}});'
-        f'if(res&&res.success)return res}}catch(e){{}}}}'
-        f'return{{success:!1,error:"未能获取到模型列表，请检查 Base URL 和 API Key"}}}}'
-        f'catch(e){{return{{success:!1,error:String(e)}}}}}}),'
+f'catch(e){{return{{success:!1,error:String(e)}}}}}}),'
     )
+    fetch = MAIN_FETCH_TEMPLATE.replace("@IPC@", ipc_var).replace("@CHANNEL@", IPC_FETCH)
+    return head + fetch
 
 
 def build_preload_patch(bridge_var: str, ipc_var: str) -> str:
