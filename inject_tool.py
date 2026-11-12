@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -33,15 +34,16 @@ WORK_DIR = Path("/tmp/zcode_inject_build")
 TEMP_ASAR = Path("/tmp/zcode_repacked.asar")
 INJECT_LOCK = Path.home() / ".zcode-model-puller" / "inject.lock"
 
-# 需要保持解包（unpacked）的原生模块：单个 glob 必须同时覆盖 .node 与 spawn-helper，
+# 需要保持解包（unpacked）的原生模块：单个 glob 必须同时覆盖 .node、.dylib、.so、.dll 与 spawn-helper，
 # 因为 asar CLI 重复传 --unpack 只会保留最后一个。
-UNPACK_GLOBS = ["**/*{node,spawn-helper}"]
+UNPACK_GLOBS = ["**/{*.node,*.dylib*,*.so*,*.dll*,spawn-helper}"]
 
 IPC_READ = "zcode:puller:read-provider-config"
 IPC_WRITE = "zcode:puller:write-provider-config"
 IPC_FETCH = "zcode:puller:fetch-models-from-url"
 
 PROVIDER_CONFIG_RELATIVE = [".zcode", "v2", "provider_config.json"]
+INJECTION_MARKER = "zcode-model-puller.js"
 
 
 def run(cmd, **kwargs):
@@ -65,11 +67,67 @@ def check_prerequisites():
     return True
 
 
+def read_asar_header(asar_path: Path):
+    with open(asar_path, "rb") as fh:
+        head = fh.read(16)
+        json_len = int.from_bytes(head[8:12], "little")
+        raw = fh.read(json_len).decode("utf-8", errors="replace")
+    # 头部 JSON 会按 4 字节对齐补位，raw_decode 可忽略尾部填充
+    return json.JSONDecoder().raw_decode(raw)[0]
+
+
+def collect_asar_files(header):
+    """把 asar 头部展开成 {相对路径: 条目} 的扁平字典。"""
+
+    def walk(node, prefix=""):
+        for name, entry in node.items():
+            path = f"{prefix}/{name}" if prefix else name
+            if "files" in entry:
+                yield from walk(entry["files"], path)
+            else:
+                yield path, entry
+
+    return dict(walk(header.get("files", {})))
+
+
+def official_unpacked_files():
+    """官方原版中被标记为 unpacked 的文件集合（用于校验我们是否原样保留）。"""
+    target = ASAR_BAK_FILE if ASAR_BAK_FILE.exists() else ASAR_FILE
+    if not target.exists():
+        return set()
+    try:
+        entries = collect_asar_files(read_asar_header(target))
+        return {path for path, entry in entries.items() if entry.get("unpacked")}
+    except Exception:
+        return set()
+
+
 def backup_asar():
+    # 检查当前 ASAR 是否未注入（即当前为官方原版）
+    is_clean_official = False
+    if ASAR_FILE.exists():
+        try:
+            header = read_asar_header(ASAR_FILE)
+            entries = collect_asar_files(header)
+            is_clean_official = not any(INJECTION_MARKER in p for p in entries)
+        except Exception:
+            is_clean_official = False
+
     if not ASAR_BAK_FILE.exists():
         print("📦 正在创建原始 app.asar 完整备份 (仅首次执行)...")
         shutil.copy2(ASAR_FILE, ASAR_BAK_FILE)
         print(f"  ✅ 备份已保存至: {ASAR_BAK_FILE}")
+    elif is_clean_official:
+        # 如果当前 app.asar 是官方原版且与备份不一致（如 ZCode 升级了），同步更新备份
+        try:
+            if ASAR_FILE.stat().st_size != ASAR_BAK_FILE.stat().st_size:
+                print("📦 检测到官方新版本 app.asar，正在更新原版备份...")
+                shutil.copy2(ASAR_FILE, ASAR_BAK_FILE)
+                print(f"  ✅ 原版备份已更新至: {ASAR_BAK_FILE}")
+            else:
+                print(f"  ℹ️ 已存在原版备份: {ASAR_BAK_FILE}")
+        except Exception:
+            print(f"  ℹ️ 已存在原版备份: {ASAR_BAK_FILE}")
     else:
         print(f"  ℹ️ 已存在原版备份: {ASAR_BAK_FILE}")
 
@@ -129,6 +187,11 @@ if(/[^\x20-\x7e]/.test(key))return{success:!1,error:"界面上的 API Key 是掩
 if(clean.endsWith("/v1")){candidates.push(clean+"/models");candidates.push(clean.replace(/\/v1$/,"")+"/models")}
 else{candidates.push(clean+"/v1/models");candidates.push(clean+"/models")}
 if(clean.endsWith("/api")){candidates.unshift(clean+"/v1/models")}
+let stripped=clean.replace(/\/(?:anthropic|chat\/completions|messages)$/,"");
+if(stripped!==clean){
+if(stripped.endsWith("/v1")){candidates.push(stripped+"/models");candidates.push(stripped.replace(/\/v1$/,"")+"/models")}
+else{candidates.push(stripped+"/v1/models");candidates.push(stripped+"/models")}}
+candidates=[...new Set(candidates)];
 let diag=[];
 for(let cur of candidates){
 let out=await new Promise(resolve=>{
@@ -148,7 +211,9 @@ req.on("timeout",()=>{req.destroy();resolve({fail:"请求超时(8s)"})});
 req.end()});
 if(out&&out.success)return out;
 diag.push(cur.replace(/^https?:\/\//,"")+" → "+((out&&out.fail)||"未知失败"))}
-return{success:!1,error:"未能获取到模型列表（Base URL: "+clean+"，API Key: "+(key?key.length+" 字符":"未读取到")+"）\n"+diag.join("\n")}
+let extra="";
+if(/deepseek\.com/i.test(clean)&&/\/anthropic/i.test(clean)){extra="\n💡 提示：DeepSeek 官方 API 为 OpenAI 兼容格式，Base URL 请填写 https://api.deepseek.com（无需 /anthropic 后缀）"}
+return{success:!1,error:"未能获取到模型列表（Base URL: "+clean+"，API Key: "+(key?key.length+" 字符":"未读取到")+"）\n"+diag.join("\n")+extra}
 }catch(e){return{success:!1,error:String(e)}}}),
 """
 
@@ -201,35 +266,31 @@ def syntax_check(path: Path, label: str) -> bool:
     return True
 
 
-def read_asar_header(asar_path: Path):
-    with open(asar_path, "rb") as fh:
-        head = fh.read(16)
-        json_len = int.from_bytes(head[8:12], "little")
-        raw = fh.read(json_len).decode("utf-8", errors="replace")
-    # 头部 JSON 会按 4 字节对齐补位，raw_decode 可忽略尾部填充
-    return json.JSONDecoder().raw_decode(raw)[0]
+def read_file_from_asar(asar_path: Path, rel_path: str) -> str:
+    """直接从 asar 二进制中毫秒级读取单个文件，免除整包提取的几十秒磁盘 I/O。"""
+    try:
+        with open(asar_path, "rb") as fh:
+            fh.seek(12)
+            header_len = struct.unpack("<I", fh.read(4))[0]
+            header_json = fh.read(header_len).decode("utf-8")
+            header = json.loads(header_json)
+            base_offset = fh.tell()
 
-
-def collect_asar_files(header):
-    """把 asar 头部展开成 {相对路径: 条目} 的扁平字典。"""
-
-    def walk(node, prefix=""):
-        for name, entry in node.items():
-            path = f"{prefix}/{name}" if prefix else name
-            if "files" in entry:
-                yield from walk(entry["files"], path)
-            else:
-                yield path, entry
-
-    return dict(walk(header.get("files", {})))
-
-
-def official_unpacked_files():
-    """官方原版中被标记为 unpacked 的文件集合（用于校验我们是否原样保留）。"""
-    if not ASAR_BAK_FILE.exists():
-        return set()
-    entries = collect_asar_files(read_asar_header(ASAR_BAK_FILE))
-    return {path for path, entry in entries.items() if entry.get("unpacked")}
+            parts = rel_path.strip("/").split("/")
+            cur = header.get("files", {})
+            for idx, part in enumerate(parts):
+                if part not in cur:
+                    return ""
+                if idx == len(parts) - 1:
+                    entry = cur[part]
+                    if "offset" in entry and "size" in entry:
+                        fh.seek(base_offset + int(entry["offset"]))
+                        return fh.read(int(entry["size"])).decode("utf-8", errors="replace")
+                    return ""
+                cur = cur[part].get("files", {})
+    except Exception:
+        return ""
+    return ""
 
 
 def verify_packed_asar(asar_path: Path):
@@ -246,25 +307,14 @@ def verify_packed_asar(asar_path: Path):
     for path in missing_unpack:
         print(f"  ️ 原生模块未被解包: {path}")
 
-    # 内容级校验
-    extract_dir = Path("/tmp/zcode_verify_extract")
-    if extract_dir.exists():
-        shutil.rmtree(extract_dir)
-    res = run(["npx", "--yes", "@electron/asar", "extract", str(asar_path), str(extract_dir)])
-    if res.returncode == 0:
-        index_html = extract_dir / "out" / "renderer" / "index.html"
-        preload = extract_dir / "out" / "preload" / "index.cjs"
-        main = extract_dir / "out" / "main" / "index.js"
-        checks["preload 桥接"] = preload.exists() and "readProviderConfigFile" in preload.read_text(
-            encoding="utf-8", errors="replace"
-        )
-        checks["main IPC"] = main.exists() and IPC_READ in main.read_text(encoding="utf-8", errors="replace")
-        checks["index.html 入口"] = index_html.exists() and "zcode-model-puller.js" in index_html.read_text(
-            encoding="utf-8", errors="replace"
-        )
-        shutil.rmtree(extract_dir, ignore_errors=True)
-    else:
-        checks["解包复核"] = False
+    # 内容级毫秒级校验
+    index_html = read_file_from_asar(asar_path, "out/renderer/index.html")
+    preload = read_file_from_asar(asar_path, "out/preload/index.cjs")
+    main = read_file_from_asar(asar_path, "out/main/index.js")
+
+    checks["preload 桥接"] = "readProviderConfigFile" in preload
+    checks["main IPC"] = IPC_READ in main
+    checks["index.html 入口"] = "zcode-model-puller.js" in index_html
 
     ok = all(checks.values())
     for name, passed in checks.items():

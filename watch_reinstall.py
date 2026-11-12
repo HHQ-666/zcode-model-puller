@@ -148,6 +148,7 @@ def seed():
         app_version=app_version(),
         recorded_at=time.strftime("%Y-%m-%d %H:%M:%S"),
         source="seed",
+        failed_sha256=None,
         **signature_fields(ASAR_FILE),
     )
     print("已记录当前 app.asar 指纹")
@@ -229,6 +230,10 @@ def main():
         save_state(**signature_fields(ASAR_FILE))  # 内容未变，只刷新时间戳
         return 0
 
+    # 该版本的 app.asar 若已尝试并失败过，避免每 5 分钟循环弹窗轰炸
+    if state.get("failed_sha256") == digest:
+        return 0
+
     version = app_version()
 
     if INJECTION_MARKER in header_raw:
@@ -237,6 +242,7 @@ def main():
             app_version=version,
             recorded_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             source="already-injected",
+            failed_sha256=None,
             **signature_fields(ASAR_FILE),
         )
         log(f"检测到已注入的构建（ZCode {version}），仅更新指纹")
@@ -260,12 +266,14 @@ def main():
             app_version=version,
             recorded_at=time.strftime("%Y-%m-%d %H:%M:%S"),
             source="auto-reinstall",
+            failed_sha256=None,
             **signature_fields(ASAR_FILE),
         )
         log(f"自动重新注入成功（ZCode {version}）")
-        notify("ZCode 更新后已自动重新注入「自动拉取模型」，重启 ZCode 后按钮即恢复")
+        notify("⚡️ ZCode 已自动完成「模型拉取」重新注入！请按快捷键 Command+Q 彻底退出并重新打开 ZCode 即可看到按钮")
         return 0
 
+    save_state(failed_sha256=digest)
     detail = (result.stdout or "")[-1500:] + (result.stderr or "")[-1500:]
     log(f"自动重新注入失败（退出码 {result.returncode}）：{detail}")
     notify("ZCode 更新后自动注入失败，请手动运行 install.sh")
