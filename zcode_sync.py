@@ -10,6 +10,7 @@ ZCode 自定义供应商模型自动拉取与同步工具
 import os
 import sys
 import json
+import re
 import time
 import shutil
 import urllib.request
@@ -70,6 +71,25 @@ def fetch_models_from_api(base_url: str, api_key: str = "", timeout: int = 10):
     if "/api" in base_url and not base_url.endswith("/models"):
         candidates.append(f"{base_url}/v1/models")
 
+    # 智能剥离多余路径（如用户误输入 /anthropic, /chat/completions, /messages 等）
+    stripped = re.sub(r'/(?:anthropic|chat/completions|messages)$', '', base_url)
+    if stripped != base_url:
+        if stripped.endswith("/v1"):
+            candidates.append(f"{stripped}/models")
+            candidates.append(f"{stripped[:-3]}/models")
+        else:
+            candidates.append(f"{stripped}/v1/models")
+            candidates.append(f"{stripped}/models")
+
+    # 去重且保持探测顺序
+    seen = set()
+    deduped = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            deduped.append(c)
+    candidates = deduped
+
     headers = {
         "User-Agent": "ZCode/3.12.2",
         "Accept": "application/json",
@@ -115,7 +135,11 @@ def fetch_models_from_api(base_url: str, api_key: str = "", timeout: int = 10):
         except Exception as e:
             last_error = str(e)
 
-    return False, f"拉取失败: {last_error or '未能解析到有效模型列表'}", []
+    err_msg = f"拉取失败: {last_error or '未能解析到有效模型列表'}"
+    if "deepseek.com" in base_url and "/anthropic" in base_url:
+        err_msg += "\n💡 提示：DeepSeek 官方 API 为 OpenAI 兼容格式，Base URL 建议填写 https://api.deepseek.com（请勿加 /anthropic 后缀），且在 ZCode 中 API 格式需选择 Chat Completions。"
+
+    return False, err_msg, []
 
 
 def list_providers(config_data):

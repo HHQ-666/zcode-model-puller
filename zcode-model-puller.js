@@ -971,8 +971,19 @@
               `${cleanUrl}/models`,
             ];
             if (cleanUrl.endsWith("/api")) candidates.unshift(`${cleanUrl}/v1/models`);
+            const stripped = cleanUrl.replace(/\/(?:anthropic|chat\/completions|messages)$/, "");
+            if (stripped !== cleanUrl) {
+              if (stripped.endsWith("/v1")) {
+                candidates.push(`${stripped}/models`);
+                candidates.push(stripped.replace(/\/v1$/, "") + "/models");
+              } else {
+                candidates.push(`${stripped}/v1/models`);
+                candidates.push(`${stripped}/models`);
+              }
+            }
+            const dedupedCandidates = [...new Set(candidates)];
 
-            for (const u of candidates) {
+            for (const u of dedupedCandidates) {
               try {
                 const headers = { Accept: "application/json" };
                 if (apiKey) {
