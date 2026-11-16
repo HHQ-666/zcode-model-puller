@@ -1,0 +1,36 @@
+# zcode-model-puller 工具配置：ruff（lint 门禁）/ pytest / coverage / 质量门禁门槛
+# 本文件由 quality-gates 分支新增，业务代码不依赖它。
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+# 硬门禁规则集（取舍理由见 QUALITY_GATES.md）：
+# 只拦会真正导致运行错误的问题——
+#   F  = pyflakes（未定义名、未使用导入、重复定义等）
+#   E9 = 语法错误类（SyntaxError、IOError 等运行时错误类）
+# 其余风格类规则（E501 行长、W 等）只在门禁脚本里以 --exit-zero 方式报告，不拦截。
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# 存量基线（只豁免下面两个文件里既有的 F401 未使用导入，共 3 处）：
+#   run.py:8        import os 未使用
+#   run.py:9        from pathlib import Path 未使用
+#   zcode_sync.py:11 import sys 未使用
+# 本次门禁落地的约束是不改动任何业务代码，故先以基线豁免过门禁，
+# 并在 QUALITY_GATES.md 中列为明确修复项；待批准修改业务代码后删掉这段基线。
+# 其余所有文件（含本次新增的 tests/、tools/）的 F401 仍是硬门禁。
+"run.py" = ["F401"]
+"zcode_sync.py" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["inject_tool", "zcode_sync", "watch_agent", "watch_reinstall", "run"]
+omit = ["tests/*", "tools/*"]
+
+[tool.quality_gates]
+# 覆盖率门槛（%）：ratchet 基线 = 首次真实运行实测值向下取整，只升不降。
+# 首跑实测与回填记录见 QUALITY_GATES.md 的首次运行报告。
+coverage_min = 27
